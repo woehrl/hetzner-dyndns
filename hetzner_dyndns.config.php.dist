@@ -4,7 +4,7 @@
  *
  * Adjust the realms array below to match your zones, tokens, and preferences.
  * Each realm can define its own TTL, API endpoint tokens, and preferred order
- * of DNS providers (classic kconsole/dns plus the new Hetzner Console API).
+ * of DNS providers (classic KonsoleH/dns plus the new Hetzner Console API).
  *
  * Copy this file to hetzner_dyndns.config.php, fill in the real tokens and passwords,
  * and keep it out of version control.
