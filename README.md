@@ -45,3 +45,5 @@
 - The script protects against concurrent access with SQLite pragmas and retry counters, so repeated failures are surfaced through the cron summary output.
 - Keep the `history_db` file writable by the PHP process (defaults to `hetzner_dyndns.sqlite3` next to the script). 
 - `.htaccess` blocks direct access to `hetzner_dyndns.php`, any other php script and related secrets while allowing DynDNS-standard paths (`/nic/update`, `/v3/update`) to proxy into the script with query parameters intact.
+
+custom: ["https://paypal.me/FWoehrl"]
