@@ -11,8 +11,9 @@
  */
 
 return [
-    // Shared password for the update/cron endpoints (used in HTTP auth or ?p=...).
-    'script_password' => 'YOUR_SECRET_PASSWORD',
+    // Authentication: single DynDNS username/password pair.
+    'auth_user' => 'update',
+    'auth_password' => 'YOUR_SECRET_PASSWORD',
 
     // Authentication realm label used when sending WWW-Authenticate headers.
     'auth_realm' => 'Your Realm Name',

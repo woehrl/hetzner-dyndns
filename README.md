@@ -10,8 +10,8 @@
 
 ## Usage
 1. Place `hetzner_dyndns.php` and `hetzner_dyndns.config.php.dist` into the document root, then copy the `.dist` file to `hetzner_dyndns.config.php`.
-2. Configure authentication credentials and realms in `hetzner_dyndns.config.php`.
-3. Point your client at `hetzner_dyndns.php` with `?hostname=...&myip=...&realm=<name>` or supply the password via `HTTP Basic`, `X-Authentication`, or the `p` parameter.
+2. Configure authentication credentials and realms in `hetzner_dyndns.config.php` (`auth_user` and `auth_password`; user defaults to `update` if omitted).
+3. Point your client at `hetzner_dyndns.php` with `?hostname=...&myip=...&realm=<name>` and authenticate via HTTP Basic (or legacy `X-Authentication` / `p` parameter if your client only supports a shared password).
    *Note: `.htaccess` rewrites `/nic/update` and `/v3/update` to `hetzner_dyndns.php`, so you can also keep using the original DynDNS-style endpoints.*
 4. Schedule a cron job such as:
    ```
@@ -25,7 +25,7 @@
 
 ## Configuration
 - `hetzner_dyndns.config.php.dist` is the committed template; copy it to `hetzner_dyndns.config.php` and fill in the real values.
-- Include shared metadata such as `script_password`, `history_db`, `default_realm`, each realm’s tokens/TTL, and `api_order`, plus the optional `auth_realm` label.
+- Include shared metadata such as `auth_user` / `auth_password` (or just `auth_password` if you stick with the default `update` username), `history_db`, `default_realm`, each realm’s tokens/TTL, and `api_order`, plus the optional `auth_realm` label.
 - The `api_order` array determines which API(s) to attempt and in which order; omit `dns` from that list if you only want the Console API to run.
 - Optionally add `'zone_name' => 'your-zone.example.com'` per realm when the DNS zone sits under a subdomain; otherwise the updater infers the domain automatically.
 - Add or adjust realms, tokens, and TTL values in that file, then rerun the cron to refresh pending rows.
