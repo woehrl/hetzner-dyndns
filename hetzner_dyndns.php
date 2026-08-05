@@ -57,8 +57,17 @@ if (!valid_hostname($hostname)) {
     exit('Invalid domain name');
 }
 
-$ipSource = $_GET['myip'] ?? resolve_client_ip();
+// Some routers send IPv6 via a dedicated parameter (FRITZ!Box: myip6, other
+// clients: myipv6) instead of a combined comma-separated myip list. When such
+// a parameter is present without myip, deliberately skip the remote-address
+// fallback: behind DS-Lite/CGNAT it would write a wrong carrier IPv4.
+$ipv6Param = $_GET['myipv6'] ?? $_GET['myip6'] ?? null;
+$ipSource = $_GET['myip'] ?? ($ipv6Param !== null ? null : resolve_client_ip());
 $ips = parse_ip_list($ipSource);
+$ipv6Extra = parse_ip_list($ipv6Param);
+if (!$ips['ipv6'] && $ipv6Extra['ipv6']) {
+    $ips['ipv6'] = $ipv6Extra['ipv6'];
+}
 if (!$ips['ipv4'] && !$ips['ipv6']) {
     exit('No valid IP address provided');
 }
@@ -85,7 +94,8 @@ if (should_skip_update($historyRow, $ips)) {
         $storedIpv4,
         $storedIpv6
     ));
-    echo 'good ' . ($ips['ipv4'] ?? $ips['ipv6']);
+    // dyndns2 protocol: "nochg" signals that the IP was already up to date.
+    echo 'nochg ' . ($ips['ipv4'] ?? $ips['ipv6']);
     exit;
 }
 
