@@ -6,7 +6,8 @@
 ## Tech stack
 - PHP (with `curl` + SQLite3) for the HTTP/cron endpoint and persistence.
 - SQLite database (`hetzner_dyndns.sqlite3`) stores the hostname-to-record metadata plus retry state.
-- Hetzner DNS API (legacy `dns.hetzner.com/api/v1`) plus the new Hetzner Console API (`api.hetzner.cloud/v1`) are both supported.
+- Hetzner Console API (`api.hetzner.cloud/v1`). The legacy DNS API (`dns.hetzner.com/api/v1`) was shut down by Hetzner in May 2026 and is no longer supported by this script.
+- Works on IPv4, dual-stack, and IPv6-only (e.g. DS-Lite) connections; A and AAAA records are updated for whichever address families the client supplies.
 
 ## Usage
 1. Place `hetzner_dyndns.php` and `hetzner_dyndns.config.php.dist` into the document root, then copy the `.dist` file to `hetzner_dyndns.config.php`.
@@ -21,14 +22,15 @@
 
 ## Command-line helper
 - `hetzner_dyndns_listhosts.php` reads the same sqlite history database and prints each hostname alongside the current IPv4/IPv6 values, the configured realm, whether the row is pending, and when it was last updated.
-- Run it only from the shell (`php cli_list_hosts.php`) so you can quickly audit what IPs are stored without invoking the HTTP endpoint.
+- Run it only from the shell (`php hetzner_dyndns_listhosts.php`) so you can quickly audit what IPs are stored without invoking the HTTP endpoint.
 
 ## Configuration
 - `hetzner_dyndns.config.php.dist` is the committed template; copy it to `hetzner_dyndns.config.php` and fill in the real values.
-- Include shared metadata such as `auth_user` / `auth_password` (or just `auth_password` if you stick with the default `update` username), `history_db`, `default_realm`, each realm’s tokens/TTL, and `api_order`, plus the optional `auth_realm` label.
-- The `api_order` array determines which API(s) to attempt and in which order; omit `dns` from that list if you only want the Console API to run.
+- Include shared metadata such as `auth_user` / `auth_password` (or just `auth_password` if you stick with the default `update` username), `history_db`, `default_realm`, each realm’s `console_token`/TTL, plus the optional `auth_realm` label.
+- The `console_token` is a Hetzner Console project API token with DNS read/write permissions; the legacy `dns_token`/`dns_endpoint`/`api_order` settings are ignored since the legacy API shutdown.
 - Optionally add `'zone_name' => 'your-zone.example.com'` per realm when the DNS zone sits under a subdomain; otherwise the updater infers the domain automatically.
 - Add or adjust realms, tokens, and TTL values in that file, then rerun the cron to refresh pending rows.
+- The DNS records themselves must already exist in the zone (create the initial A/AAAA records once in the Hetzner Console); the updater only changes their values.
 
 ## Notifications
 - Enable `'notifications.enabled' => true` to send an email after each update attempt.

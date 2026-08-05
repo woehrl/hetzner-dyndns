@@ -3,8 +3,9 @@
  * Hetzner DNS Dynamic DNS Script (enhanced)
  *
  * Maintains per-realm configuration in a separate file, retries failed API calls,
- * and supports both the legacy DNS API and the newer Hetzner Console API so updates
- * are never silently dropped.
+ * and talks to the Hetzner Console API (api.hetzner.cloud) so updates are never
+ * silently dropped. The legacy DNS API (dns.hetzner.com) was shut down by Hetzner
+ * in May 2026 and its support has been removed from this script.
  *
  * `.htaccess` rewrites `/nic/update` and `/v3/update` into this file while blocking
  * direct requests, so the DynDNS-style paths remain viable long term.
@@ -88,7 +89,7 @@ if (should_skip_update($historyRow, $ips)) {
     exit;
 }
 
-$result = sync_host($db, $config, $realmKey, $realmConfig, $hostname, $domain, $zoneLookupName, $hostnameName, $ips, $historyRow);
+$result = sync_host($db, $config, $realmKey, $realmConfig, $hostname, $zoneLookupName, $hostnameName, $ips, $historyRow);
 send_notification($config['notifications'] ?? [], $realmKey, $hostname, $ips, $result);
 if ($result['success']) {
     echo 'good ' . ($ips['ipv4'] ?? $ips['ipv6']);
@@ -141,11 +142,13 @@ function get_realm_config(array $config, string $realmKey): array
         throw new RuntimeException('Realm not defined: ' . $realmKey);
     }
 
-    $realm['dns_endpoint'] = rtrim($realm['dns_endpoint'] ?? 'https://dns.hetzner.com/api/v1', '/');
     $realm['console_endpoint'] = rtrim($realm['console_endpoint'] ?? 'https://api.hetzner.cloud/v1', '/');
     $realm['ttl'] = $realm['ttl'] ?? 60;
-    $realm['api_order'] = array_values(array_filter($realm['api_order'] ?? ['dns', 'console']));
     $realm['zone_name'] = trim($realm['zone_name'] ?? '');
+
+    if (!empty($realm['dns_token']) || !empty($realm['dns_endpoint']) || !empty($realm['api_order'])) {
+        log_debug('Legacy DNS API settings (dns_token/dns_endpoint/api_order) are ignored; the legacy API was shut down by Hetzner in May 2026.');
+    }
 
     return $realm;
 }
@@ -175,6 +178,13 @@ function get_cron_context(): array
  */
 function authenticate(array $config): void
 {
+    // CLI invocations (cron) cannot carry HTTP credentials; having shell access
+    // to the host implies authorization. Without this, `--cron` always failed
+    // with "Unauthorized".
+    if (PHP_SAPI === 'cli') {
+        return;
+    }
+
     $realmLabel = $config['auth_realm'] ?? 'My Dynamic DNS service';
     $user = trim((string) ($config['auth_user'] ?? ''));
     if ($user === '') {
@@ -189,42 +199,43 @@ function authenticate(array $config): void
     }
     $authValue = $_SERVER['HTTP_X_AUTHENTICATION'] ?? null;
 
-    if (isset($_SERVER['PHP_AUTH_DIGEST'])) {
-        $digest = $_SERVER['PHP_AUTH_DIGEST'];
-        $expected = md5($user . ':' . $passwords[0]);
-        if (strpos($digest, 'username="' . $user . '"') === false || strpos($digest, 'response="' . $expected . '"') === false) {
-            send_auth_headers($realmLabel);
-        }
-        return;
-    }
-
     if (isset($_SERVER['PHP_AUTH_USER'], $_SERVER['PHP_AUTH_PW'])) {
         foreach ($passwords as $password) {
-            if ($_SERVER['PHP_AUTH_USER'] === $user && $_SERVER['PHP_AUTH_PW'] === $password) {
+            if (hash_equals($user, (string) $_SERVER['PHP_AUTH_USER']) && hash_equals($password, (string) $_SERVER['PHP_AUTH_PW'])) {
                 return;
             }
         }
         send_auth_headers($realmLabel);
     }
 
-    if ($authValue !== null && in_array($authValue, $passwords, true)) {
+    if ($authValue !== null && password_in_list($authValue, $passwords)) {
         return;
     }
 
     if (isset($_SERVER['HTTP_AUTHORIZATION']) && strpos($_SERVER['HTTP_AUTHORIZATION'], 'Basic ') === 0) {
         [$basicUser, $basicPass] = array_pad(explode(':', base64_decode(substr($_SERVER['HTTP_AUTHORIZATION'], 6)), 2), 2, '');
         foreach ($passwords as $password) {
-            if ($basicUser === $user && $basicPass === $password) {
+            if (hash_equals($user, $basicUser) && hash_equals($password, $basicPass)) {
                 return;
             }
         }
     }
 
-    if (isset($_GET['p']) && in_array($_GET['p'], $passwords, true)) {
+    if (isset($_GET['p']) && password_in_list((string) $_GET['p'], $passwords)) {
         return;
     }
 
     send_auth_headers($realmLabel);
+}
+
+function password_in_list(string $candidate, array $passwords): bool
+{
+    foreach ($passwords as $password) {
+        if (hash_equals($password, $candidate)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 function send_auth_headers(string $realm): void
@@ -383,10 +394,9 @@ function should_skip_update(?array $row, array $ips): bool
 /**
  * Coordinate the update attempt, record the results, and mark rows for cron retries when needed.
  */
-function sync_host(SQLite3 $db, array $config, string $realmKey, array $realmConfig, string $hostname, string $domain, string $zoneName, string $hostnameName, array $ips, ?array $historyRow): array
+function sync_host(SQLite3 $db, array $config, string $realmKey, array $realmConfig, string $hostname, string $zoneName, string $hostnameName, array $ips, ?array $historyRow): array
 {
-    // Attempt to update DNS records by iterating over all configured APIs until one succeeds.
-    $attempt = try_update($realmConfig, $domain, $zoneName, $hostnameName, $ips, $historyRow);
+    $attempt = try_update($realmConfig, $zoneName, $hostnameName, $ips, $historyRow);
     $needsSync = !$attempt['success'];
     $retryCount = $needsSync ? min(($historyRow['retry_count'] ?? 0) + 1, $config['max_retry_attempts'] ?? 5) : 0;
     $pendingSince = $needsSync ? ($historyRow['pending_since'] ?? time()) : null;
@@ -395,9 +405,9 @@ function sync_host(SQLite3 $db, array $config, string $realmKey, array $realmCon
         $hostname,
         $realmKey,
         $ips,
-        $attempt['zone_id'],
-        $attempt['recordA_id'],
-        $attempt['recordAAAA_id'],
+        $attempt['zone_id'] ?? null,
+        null,
+        null,
         $needsSync,
         $retryCount,
         $attempt['message'],
@@ -408,141 +418,28 @@ function sync_host(SQLite3 $db, array $config, string $realmKey, array $realmCon
 }
 
 /**
- * Attempt each configured API in order, carrying over the latest zone/record IDs.
+ * Run the update against the Hetzner Console API, reusing the cached zone ID
+ * when available and falling back to a fresh zone lookup if that fails.
  */
-function try_update(array $realmConfig, string $domain, string $zoneName, string $hostnameName, array $ips, ?array $historyRow): array
+function try_update(array $realmConfig, string $zoneName, string $hostnameName, array $ips, ?array $historyRow): array
 {
-    $zoneId = $historyRow['zone_id'] ?? null;
-    $recordAId = $historyRow['recordA_id'] ?? null;
-    $recordAAAAId = $historyRow['recordAAAA_id'] ?? null;
-    $errors = [];
-
-    foreach ($realmConfig['api_order'] as $api) {
-        if ($api === 'dns') {
-            if (empty($realmConfig['dns_token'])) {
-                continue;
-            }
-            $response = update_via_dns_api($realmConfig, $domain, $zoneName, $hostnameName, $ips, $zoneId, $recordAId, $recordAAAAId);
-        } elseif ($api === 'console') {
-            if (empty($realmConfig['console_token'])) {
-                continue;
-            }
-            $response = update_via_console_api($realmConfig, $zoneName, $hostnameName, $ips, null);
-        } else {
-            continue;
-        }
-
-        $zoneId = $response['zone_id'] ?? $zoneId;
-        $recordAId = $response['recordA_id'] ?? $recordAId;
-        $recordAAAAId = $response['recordAAAA_id'] ?? $recordAAAAId;
-
-        if ($response['success']) {
-            return array_merge($response, [
-                'zone_id' => $zoneId,
-                'recordA_id' => $recordAId,
-                'recordAAAA_id' => $recordAAAAId,
-                'api_used' => $api,
-            ]);
-        }
-
-        $errors[] = sprintf('%s API error: %s', strtoupper($api), $response['message']);
-    }
-
-    return [
-        'success' => false,
-        'message' => implode(' | ', $errors) ?: 'No API configured',
-        'zone_id' => $zoneId,
-        'recordA_id' => $recordAId,
-        'recordAAAA_id' => $recordAAAAId,
-    ];
-}
-
-/**
- * Update the legacy Hetzner DNS zone/records, looking up record IDs when missing.
- */
-function update_via_dns_api(array $realmConfig, string $domain, string $zoneName, string $hostnameName, array $ips, ?string $zoneId, ?string $recordAId, ?string $recordAAAAId): array
-{
-    $ttl = $realmConfig['ttl'];
-    $endpoint = $realmConfig['dns_endpoint'];
-    $token = $realmConfig['dns_token'];
-    log_debug(sprintf('DNS API update prepared for %s (%s) in zone "%s" via %s', $hostnameName, $domain, $zoneName, $endpoint));
-
-    if (!$zoneId) {
-        $zoneId = fetch_zone_id($endpoint, $token, $zoneName);
-        if (!$zoneId) {
-            log_debug(sprintf('DNS API zone lookup failed for "%s" (derived "%s")', $zoneName, $domain));
-            return ['success' => false, 'message' => 'Zone not found', 'zone_id' => null];
-        }
-        log_debug(sprintf('DNS API resolved zone "%s" to id %s', $zoneName, $zoneId));
-    }
-
-    if (!$recordAId || !$recordAAAAId) {
-        $records = fetch_records($endpoint, $token, $zoneId, $hostnameName);
-        $recordAId = $recordAId ?: $records['A'] ?? null;
-        $recordAAAAId = $recordAAAAId ?: $records['AAAA'] ?? null;
-    }
-
-    // Only require record IDs for the address families we actually received.
-    if ($ips['ipv4'] && !$recordAId) {
-        return ['success' => false, 'message' => 'Missing A record ID', 'zone_id' => $zoneId];
-    }
-    if (!$ips['ipv4'] && $ips['ipv6'] && !$recordAAAAId) {
-        return ['success' => false, 'message' => 'Missing AAAA record ID', 'zone_id' => $zoneId];
-    }
-
-    if ($ips['ipv4'] && $recordAId) {
-        $payload = [
-            'value' => $ips['ipv4'],
-            'ttl' => $ttl,
-            'type' => 'A',
-            'name' => $hostnameName,
-            'zone_id' => $zoneId,
+    if (empty($realmConfig['console_token'])) {
+        return [
+            'success' => false,
+            'message' => 'No console_token configured for this realm (the legacy DNS API was shut down in May 2026)',
+            'zone_id' => $historyRow['zone_id'] ?? null,
         ];
-
-        $response = http_request('PUT', $endpoint . '/records/' . $recordAId, [
-            'Content-Type: application/json',
-            'Auth-API-Token: ' . $token,
-        ], $payload);
-
-        log_debug(sprintf('DNS API A-record update returned %s', $response['success'] ? 'success' : 'failure'));
-        if (!$response['success']) {
-            return [
-                'success' => false,
-                'message' => $response['error'] ?? 'Failed to update A record',
-                'zone_id' => $zoneId,
-            ];
-        }
     }
 
-    if ($ips['ipv6'] && $recordAAAAId) {
-        $payload = [
-            'value' => $ips['ipv6'],
-            'ttl' => $ttl,
-            'type' => 'AAAA',
-            'name' => $hostnameName,
-            'zone_id' => $zoneId,
-        ];
-        $response = http_request('PUT', $endpoint . '/records/' . $recordAAAAId, [
-            'Content-Type: application/json',
-            'Auth-API-Token: ' . $token,
-        ], $payload);
-        if (!$response['success']) {
-            return [
-                'success' => false,
-                'message' => $response['error'] ?? 'Failed to update AAAA record',
-                'zone_id' => $zoneId,
-                'recordA_id' => $recordAId,
-            ];
-        }
+    $cachedZoneId = $historyRow['zone_id'] ?? null;
+    $response = update_via_console_api($realmConfig, $zoneName, $hostnameName, $ips, $cachedZoneId);
+    if (!$response['success'] && $cachedZoneId) {
+        log_debug('Update with cached zone id failed; retrying with a fresh zone lookup');
+        $response = update_via_console_api($realmConfig, $zoneName, $hostnameName, $ips, null);
     }
 
-    return [
-        'success' => true,
-        'message' => 'DNS record updated via classic API',
-        'zone_id' => $zoneId,
-        'recordA_id' => $recordAId,
-        'recordAAAA_id' => $recordAAAAId,
-    ];
+    $response['api_used'] = 'console';
+    return $response;
 }
 
 /**
@@ -564,7 +461,6 @@ function update_via_console_api(array $realmConfig, string $zoneName, string $ho
         log_debug(sprintf('Console API resolved zone "%s" to id %s', $zoneName, $zoneId));
     }
 
-    $ttl = $realmConfig['ttl'];
     $nameCandidates = build_rrset_candidates($hostnameName);
     $updates = [
         'A' => $ips['ipv4'],
@@ -606,7 +502,7 @@ function update_via_console_api(array $realmConfig, string $zoneName, string $ho
     if ($hadMissing) {
         return [
             'success' => false,
-            'message' => 'Console rrset names missing',
+            'message' => 'No matching rrset found for the host; create the A/AAAA record in the zone first',
             'zone_id' => $zoneId,
         ];
     }
@@ -616,38 +512,6 @@ function update_via_console_api(array $realmConfig, string $zoneName, string $ho
         'message' => 'Records updated via Hetzner Console API',
         'zone_id' => $zoneId,
     ];
-}
-
-function fetch_zone_id(string $endpoint, string $token, string $zoneName): ?string
-{
-    $response = http_request('GET', $endpoint . '/zones?name=' . urlencode($zoneName), [
-        'Content-Type: application/json',
-        'Auth-API-Token: ' . $token,
-    ]);
-
-    $zones = $response['data']['zones'] ?? [];
-    if (!empty($zones)) {
-        return $zones[0]['id'] ?? null;
-    }
-
-    return null;
-}
-
-function fetch_records(string $endpoint, string $token, string $zoneId, string $hostnameName): array
-{
-    $response = http_request('GET', $endpoint . '/records?zone_id=' . urlencode($zoneId), [
-        'Content-Type: application/json',
-        'Auth-API-Token: ' . $token,
-    ]);
-
-    $result = ['A' => null, 'AAAA' => null];
-    foreach ($response['data']['records'] ?? [] as $record) {
-        if ($record['name'] === $hostnameName && in_array($record['type'], ['A', 'AAAA'], true)) {
-            $result[$record['type']] = $record['id'];
-        }
-    }
-
-    return $result;
 }
 
 function fetch_console_zone_id(string $endpoint, string $token, string $zoneName): ?string
@@ -702,14 +566,10 @@ function build_rrset_candidates(string $hostnameName): array
         return ['@'];
     }
 
-    $parts = explode('.', $hostnameName);
-    $candidates = [];
-    for ($i = 0, $len = count($parts); $i < $len; $i++) {
-        $candidates[] = implode('.', array_slice($parts, 0, $len - $i));
-    }
-    $candidates[] = '@';
-
-    return array_filter(array_unique($candidates));
+    // Only the exact rrset name may be updated. Falling back to parent labels
+    // or the zone apex (as earlier versions did) silently rewrote unrelated
+    // records when the requested host had no rrset of its own.
+    return [$hostnameName];
 }
 
 /**
@@ -1089,13 +949,16 @@ function process_pending_updates(SQLite3 $db, array $config, ?string $realmFilte
             $hostnameName = $overriddenHostnameName === '' ? '@' : $overriddenHostnameName;
         }
         $ips = ['ipv4' => $row['ip'], 'ipv6' => $row['ip6']];
-        $result = sync_host($db, $config, $realmKey, $realmConfig, $row['hostname'], $domain, $zoneLookupName, $hostnameName, $ips, $row);
-        if ($result['success']) {
+        // Note: do NOT reuse $result here - it still holds the SQLite3Result the
+        // while loop iterates over; overwriting it crashed the cron after the
+        // first pending row.
+        $attempt = sync_host($db, $config, $realmKey, $realmConfig, $row['hostname'], $zoneLookupName, $hostnameName, $ips, $row);
+        if ($attempt['success']) {
             $summary['success']++;
-            $summary['details'][$row['hostname']] = ['status' => 'success', 'api' => $result['api_used'] ?? $result['api'] ?? 'unknown'];
+            $summary['details'][$row['hostname']] = ['status' => 'success', 'api' => $attempt['api_used'] ?? 'unknown'];
         } else {
             $summary['failed']++;
-            $summary['details'][$row['hostname']] = ['status' => 'failed', 'message' => $result['message']];
+            $summary['details'][$row['hostname']] = ['status' => 'failed', 'message' => $attempt['message']];
         }
     }
 
