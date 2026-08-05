@@ -58,8 +58,8 @@ if (!valid_hostname($hostname)) {
 
 $ipSource = $_GET['myip'] ?? resolve_client_ip();
 $ips = parse_ip_list($ipSource);
-if (!$ips['ipv4']) {
-    exit('No valid IPv4 address provided');
+if (!$ips['ipv4'] && !$ips['ipv6']) {
+    exit('No valid IP address provided');
 }
 
 $split = split_hostname($hostname);
@@ -84,14 +84,14 @@ if (should_skip_update($historyRow, $ips)) {
         $storedIpv4,
         $storedIpv6
     ));
-    echo 'good ' . $ips['ipv4'];
+    echo 'good ' . ($ips['ipv4'] ?? $ips['ipv6']);
     exit;
 }
 
 $result = sync_host($db, $config, $realmKey, $realmConfig, $hostname, $domain, $zoneLookupName, $hostnameName, $ips, $historyRow);
 send_notification($config['notifications'] ?? [], $realmKey, $hostname, $ips, $result);
 if ($result['success']) {
-    echo 'good ' . $ips['ipv4'];
+    echo 'good ' . ($ips['ipv4'] ?? $ips['ipv6']);
     exit;
 }
 
@@ -272,7 +272,13 @@ function parse_ip_list(?string $ip): array
 
 function valid_hostname(string $hostname): bool
 {
-    return (bool) preg_match('/^([a-z0-9](-*[a-z0-9])*)+(\.[a-z]{2,})+$/i', $hostname);
+    // At least two labels are required so split_hostname() can derive a zone;
+    // filter_var alone would also accept single-label names like "example".
+    if (strpos($hostname, '.') === false) {
+        return false;
+    }
+
+    return filter_var($hostname, FILTER_VALIDATE_DOMAIN, FILTER_FLAG_HOSTNAME) !== false;
 }
 
 function split_hostname(string $hostname): array
@@ -476,30 +482,36 @@ function update_via_dns_api(array $realmConfig, string $domain, string $zoneName
         $recordAAAAId = $recordAAAAId ?: $records['AAAA'] ?? null;
     }
 
-    if (!$recordAId) {
+    // Only require record IDs for the address families we actually received.
+    if ($ips['ipv4'] && !$recordAId) {
         return ['success' => false, 'message' => 'Missing A record ID', 'zone_id' => $zoneId];
     }
+    if (!$ips['ipv4'] && $ips['ipv6'] && !$recordAAAAId) {
+        return ['success' => false, 'message' => 'Missing AAAA record ID', 'zone_id' => $zoneId];
+    }
 
-    $payload = [
-        'value' => $ips['ipv4'],
-        'ttl' => $ttl,
-        'type' => 'A',
-        'name' => $hostnameName,
-        'zone_id' => $zoneId,
-    ];
-
-    $response = http_request('PUT', $endpoint . '/records/' . $recordAId, [
-        'Content-Type: application/json',
-        'Auth-API-Token: ' . $token,
-    ], $payload);
-
-        log_debug(sprintf('DNS API AAAA-record update returned %s', $response['success'] ? 'success' : 'failure'));
-        if (!$response['success']) {
-            return [
-            'success' => false,
-            'message' => $response['error'] ?? 'Failed to update A record',
+    if ($ips['ipv4'] && $recordAId) {
+        $payload = [
+            'value' => $ips['ipv4'],
+            'ttl' => $ttl,
+            'type' => 'A',
+            'name' => $hostnameName,
             'zone_id' => $zoneId,
         ];
+
+        $response = http_request('PUT', $endpoint . '/records/' . $recordAId, [
+            'Content-Type: application/json',
+            'Auth-API-Token: ' . $token,
+        ], $payload);
+
+        log_debug(sprintf('DNS API A-record update returned %s', $response['success'] ? 'success' : 'failure'));
+        if (!$response['success']) {
+            return [
+                'success' => false,
+                'message' => $response['error'] ?? 'Failed to update A record',
+                'zone_id' => $zoneId,
+            ];
+        }
     }
 
     if ($ips['ipv6'] && $recordAAAAId) {
