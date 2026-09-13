@@ -93,6 +93,7 @@ Responses follow the dyndns2 convention:
 - Password comparisons use `hash_equals()`. The broken HTTP Digest branch was removed; use HTTP Basic over TLS.
 - The script protects against concurrent access with SQLite pragmas and retry counters, so repeated failures are surfaced through the cron summary output.
 - Keep the `history_db` file writable by the PHP process (defaults to `hetzner_dyndns.sqlite3` next to the script).
-- `.htaccess` blocks direct access to `hetzner_dyndns.php`, any other php script and related secrets while allowing DynDNS-standard paths (`/nic/update`, `/v3/update`) to proxy into the script with query parameters intact.
+- `.htaccess` blocks direct access to `hetzner_dyndns.php` and any other php script while allowing DynDNS-standard paths (`/nic/update`, `/v3/update`) to proxy into the script with query parameters intact.
+- It also blocks the sqlite history database, log files, the config template and dotfiles by suffix, so `hetzner_dyndns.sqlite3` and `hetzner_dyndns.debug.log` stay unreachable even when they sit in the document root. `/.well-known/` is deliberately exempt so ACME certificate challenges keep working. This only applies to Apache — on nginx or another server you have to deny those paths yourself.
 
 [![Donate](https://img.shields.io/badge/Donate-PayPal-blue.svg)](https://www.paypal.me/FWoehrl)

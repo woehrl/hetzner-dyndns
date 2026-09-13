@@ -12,8 +12,17 @@ RewriteRule ^.*$ hetzner_dyndns.php [L,QSA]
 RewriteCond %{THE_REQUEST} \s/hetzner_dyndns\.php\s [NC]
 RewriteRule ^hetzner_dyndns\.php$ - [F,L]
 
-# Disallow access to .htaccess, .htpasswd, config templates, log files, and other sensitive files
-RewriteRule ^(\.htaccess|\.htpasswd|\.sqlite3|\.ini|\.env|\.gitignore|\.log|hetzner_dyndns\.config\.php|hetzner_dyndns\.config\.php\.dist|hetzner_dyndns\.debug\.log)$ - [F,L]
+# Disallow access to dotfiles and dot-directories (.htaccess, .htpasswd, .env,
+# .git, .gitignore) in any directory, but keep /.well-known reachable so ACME
+# challenges for TLS certificates still work.
+RewriteCond %{REQUEST_URI} !^/\.well-known/
+RewriteRule (^|/)\. - [F,L]
+
+# Disallow access to the sqlite history database, log files, config templates
+# and editor/backup leftovers. Matched as a suffix, so hetzner_dyndns.sqlite3
+# and hetzner_dyndns.debug.log are covered as well - a plain ^\.sqlite3$ would
+# only have matched a file literally named ".sqlite3".
+RewriteRule (\.(sqlite3|sqlite|db|ini|log|dist|bak|old|orig|save|swp|swo|tmp)|~)$ - [F,L,NC]
 
 # Disallow direct access to any PHP file except the rewrite-driven DynDNS endpoints.
 RewriteCond %{THE_REQUEST} !/nic/update
