@@ -10,13 +10,13 @@
 - Works on IPv4, dual-stack, and IPv6-only (e.g. DS-Lite) connections; A and AAAA records are updated for whichever address families the client supplies.
 
 ## Requirements
-- PHP 7.1 or newer with the `curl` and `sqlite3` extensions enabled.
+- PHP 7.1 or newer with the `curl` and `sqlite3` extensions enabled. Use a release that contains the October 2026 PHP2Shell fixes (8.2.35, 8.3.36, 8.4.27, 8.5.12 or later); on shared hosting select that version in the hoster's control panel.
 - Apache with `mod_rewrite` and `.htaccess` overrides enabled — the shipped `.htaccess` provides the DynDNS endpoints and blocks direct script access.
 - A Hetzner Console project API token with DNS read/write permissions (one per realm).
 - The A/AAAA records must already exist in the zone; the updater only changes their values, it never creates records.
 
 ## Usage
-1. Place `hetzner_dyndns.php`, `.htaccess` and `hetzner_dyndns.config.php.dist` into the document root, then copy the `.dist` file to `hetzner_dyndns.config.php`.
+1. Place `hetzner_dyndns.php`, `.htaccess`, `.user.ini` and `hetzner_dyndns.config.php.dist` into the document root, then copy the `.dist` file to `hetzner_dyndns.config.php`.
 2. Configure authentication credentials and realms in `hetzner_dyndns.config.php` (`auth_user` and `auth_password`; user defaults to `update` if omitted).
 3. Point your client at `/nic/update` or `/v3/update` and authenticate via HTTP Basic (or the legacy `X-Authentication` header / `p` parameter if your client only supports a shared password):
    ```
@@ -93,7 +93,8 @@ Responses follow the dyndns2 convention:
 - Password comparisons use `hash_equals()`. The broken HTTP Digest branch was removed; use HTTP Basic over TLS.
 - The script protects against concurrent access with SQLite pragmas and retry counters, so repeated failures are surfaced through the cron summary output.
 - Keep the `history_db` file writable by the PHP process (defaults to `hetzner_dyndns.sqlite3` next to the script).
-- `.htaccess` blocks direct access to `hetzner_dyndns.php` and any other php script while allowing DynDNS-standard paths (`/nic/update`, `/v3/update`) to proxy into the script with query parameters intact.
-- It also blocks the sqlite history database, log files, the config template and dotfiles by suffix, so `hetzner_dyndns.sqlite3` and `hetzner_dyndns.debug.log` stay unreachable even when they sit in the document root. `/.well-known/` is deliberately exempt so ACME certificate challenges keep working. This only applies to Apache — on nginx or another server you have to deny those paths yourself.
+- `.htaccess` is deny-by-default: only `/nic/update` and `/v3/update` (rewritten into `hetzner_dyndns.php` with the query string intact) and non-PHP files below `/.well-known/` (ACME challenges) are served. Everything else - the PHP scripts, `hetzner_dyndns.sqlite3`, `hetzner_dyndns.debug.log`, the config template, dotfiles, backups - answers 403, whatever the file is called. Requests with a method other than GET/HEAD are refused before PHP sees them. The endpoint check is anchored on the request path: earlier versions matched `/nic/update` anywhere in the request line, so `/hetzner_dyndns_listhosts.php?/nic/update` slipped past the PHP block, and an anchored `^\.sqlite3$` pattern left the database downloadable. This only applies to Apache - on nginx or another server you have to deny those paths yourself.
+- `.user.ini` (read by PHP-FPM/CGI, ignored by mod_php) turns `display_errors` off, disables session upload progress and caps POST sizes. Together with the GET-only rule this keeps the request paths used by PHP2Shell (CVE-2026-109618/-109619) and CVE-2026-115560 away from this endpoint. It is a mitigation, not a fix - keep PHP patched.
+- The scripts never show PHP errors to HTTP clients; uncaught errors go to the server's error log instead of leaking filesystem paths.
 
 [![Donate](https://img.shields.io/badge/Donate-PayPal-blue.svg)](https://www.paypal.me/FWoehrl)
